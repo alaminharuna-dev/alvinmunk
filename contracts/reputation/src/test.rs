@@ -521,44 +521,6 @@ fn claim_and_expire_agree_on_the_deadline() {
     assert!(client.get_vouch(&unclaimed).unwrap().slashed);
 }
 
-/// The exact boundary second, pinned for both entrypoints in one place: at
-/// `created + VOUCH_TTL_SECS` a claim refunds and `expire_vouch` reverts with
-/// `NotExpired`; one second later the claim refunds nothing and `expire_vouch`
-/// slashes. An off-by-one on either `<=` would fail here.
-#[test]
-fn the_boundary_second_is_inclusive_for_claim_and_exclusive_for_expire() {
-    let (env, client, _admin) = setup();
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let (s1, h1) = secret_and_hash(&env, 1);
-    let (s2, h2) = secret_and_hash(&env, 2);
-    let (_s3, h3) = secret_and_hash(&env, 3);
-    let created = 5_000u64;
-    env.ledger().with_mut(|l| l.timestamp = created);
-    let on_time = client.mint_vouch(&alice, &h1, &String::from_str(&env, "a"));
-    let late = client.mint_vouch(&alice, &h2, &String::from_str(&env, "b"));
-    let unclaimed = client.mint_vouch(&alice, &h3, &String::from_str(&env, "c"));
-
-    // Exactly at the deadline: expire reverts, claim refunds.
-    env.ledger()
-        .with_mut(|l| l.timestamp = created + VOUCH_TTL_SECS);
-    assert_eq!(
-        client.try_expire_vouch(&unclaimed),
-        Err(Ok(contract_err(Error::NotExpired)))
-    );
-    client.claim_vouch(&bob, &on_time, &s1);
-    assert_eq!(client.get_score(&alice), STARTER_SOCIAL - 2 * VOUCH_STAKE);
-
-    // One second later: expire slashes, claim refunds nothing.
-    env.ledger()
-        .with_mut(|l| l.timestamp = created + VOUCH_TTL_SECS + 1);
-    client.claim_vouch(&bob, &late, &s2);
-    assert_eq!(client.get_score(&alice), STARTER_SOCIAL - 2 * VOUCH_STAKE);
-    client.expire_vouch(&unclaimed);
-    assert!(client.get_vouch(&unclaimed).unwrap().slashed);
-    assert_eq!(client.get_score(&alice), STARTER_SOCIAL - 2 * VOUCH_STAKE);
-}
-
 /// The deadline saturates instead of overflowing: a card minted within `VOUCH_TTL_SECS` of
 /// `u64::MAX` still claims (with its refund), and can never be expired (issue #128).
 #[test]
@@ -583,6 +545,32 @@ fn claim_deadline_saturates_at_the_end_of_time() {
         Err(Ok(contract_err(Error::NotExpired)))
     );
     assert!(!client.get_vouch(&unclaimed).unwrap().slashed);
+}
+
+/// The expire deadline in isolation: at exactly `created + VOUCH_TTL_SECS` a card is still
+/// live (`NotExpired`), one second later it slashes — pinning the `<=` on `expire_vouch`
+/// independently of the claim side.
+#[test]
+fn expire_vouch_boundary_second() {
+    let (env, client, _admin) = setup();
+    let alice = Address::generate(&env);
+    let (_s, h) = secret_and_hash(&env, 7);
+    let created = 1_000u64;
+    env.ledger().with_mut(|l| l.timestamp = created);
+    let id = client.mint_vouch(&alice, &h, &String::from_str(&env, "x"));
+
+    env.ledger()
+        .with_mut(|l| l.timestamp = created + VOUCH_TTL_SECS);
+    assert_eq!(
+        client.try_expire_vouch(&id),
+        Err(Ok(contract_err(Error::NotExpired)))
+    );
+    assert!(!client.get_vouch(&id).unwrap().slashed);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp = created + VOUCH_TTL_SECS + 1);
+    client.expire_vouch(&id);
+    assert!(client.get_vouch(&id).unwrap().slashed);
 }
 
 #[test]
