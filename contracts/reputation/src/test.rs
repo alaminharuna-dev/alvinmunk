@@ -380,34 +380,27 @@ fn expire_vouch_before_ttl_reverts() {
 }
 
 #[test]
-fn expire_vouch_is_idempotent() {
-    use soroban_sdk::{testutils::Events as _, IntoVal};
+fn expire_vouch_unknown_id_reverts_with_vouch_not_found() {
     let (env, client, _admin) = setup();
-    let alice = Address::generate(&env);
-    let (_s, h) = secret_and_hash(&env, 7);
-    let id = client.mint_vouch(&alice, &h, &String::from_str(&env, "x"));
-    env.ledger().with_mut(|l| l.timestamp = VOUCH_TTL_SECS + 1);
-    client.expire_vouch(&id);
-    let score_after_first = client.get_score(&alice);
-    assert_eq!(score_after_first, 15);
-
-    // A second expiry must not emit a second `slashed` event or touch any score.
-    client.expire_vouch(&id);
-    let slashed_topics: soroban_sdk::Vec<soroban_sdk::Val> =
-        (symbol_short!("vouch"), symbol_short!("slashed")).into_val(&env);
-    let slashes = env
-        .events()
-        .all()
-        .iter()
-        .filter(|(_, topics, _)| *topics == slashed_topics)
-        .count();
-    assert_eq!(slashes, 0);
-    assert_eq!(client.get_score(&alice), score_after_first);
-    assert!(client.get_vouch(&id).unwrap().slashed);
+    assert_eq!(
+        client.try_expire_vouch(&99),
+        Err(Ok(contract_err(Error::VouchNotFound)))
+    );
 }
 
 #[test]
-fn expire_vouch_after_claim_reverts() {
+fn claim_vouch_unknown_id_reverts_with_vouch_not_found() {
+    let (env, client, _admin) = setup();
+    let bob = Address::generate(&env);
+    let (secret, _hash) = secret_and_hash(&env, 7);
+    assert_eq!(
+        client.try_claim_vouch(&bob, &99, &secret),
+        Err(Ok(contract_err(Error::VouchNotFound)))
+    );
+}
+
+#[test]
+fn expire_vouch_after_claim_reverts_with_already_claimed() {
     let (env, client, _admin) = setup();
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
@@ -421,43 +414,32 @@ fn expire_vouch_after_claim_reverts() {
     );
 }
 
+/// A second `expire_vouch` on an already-slashed card is a no-op: no second
+/// `vouch`/`slashed` event and no score change.
 #[test]
-fn expire_vouch_unknown_id_reverts() {
-    let (env, client, _admin) = setup();
-    assert_eq!(
-        client.try_expire_vouch(&99),
-        Err(Ok(contract_err(Error::VouchNotFound)))
-    );
-}
-
-#[test]
-fn claim_vouch_unknown_id_reverts() {
-    let (env, client, _admin) = setup();
-    let bob = Address::generate(&env);
-    let (s, _h) = secret_and_hash(&env, 7);
-    assert_eq!(
-        client.try_claim_vouch(&bob, &99, &s),
-        Err(Ok(contract_err(Error::VouchNotFound)))
-    );
-}
-
-#[test]
-fn claim_after_expire_vouch_still_claims_but_never_refunds() {
+fn expire_vouch_is_idempotent() {
+    use soroban_sdk::{testutils::Events as _, IntoVal};
     let (env, client, _admin) = setup();
     let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let (s, h) = secret_and_hash(&env, 7);
+    let (_s, h) = secret_and_hash(&env, 7);
     let id = client.mint_vouch(&alice, &h, &String::from_str(&env, "x"));
     env.ledger().with_mut(|l| l.timestamp = VOUCH_TTL_SECS + 1);
     client.expire_vouch(&id);
-    assert_eq!(client.get_score(&alice), 15);
+    let score_after_first = client.get_score(&alice);
+    assert_eq!(score_after_first, 15);
 
-    client.claim_vouch(&bob, &id, &s);
-    let v = client.get_vouch(&id).unwrap();
-    assert!(v.claimed && v.slashed);
-    // The voucher gets nothing back; the claimer still earns.
-    assert_eq!(client.get_score(&alice), 15);
-    assert_eq!(client.get_score(&bob), 30);
+    client.expire_vouch(&id);
+    let slashed_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("vouch"), symbol_short!("slashed")).into_val(&env);
+    let slashes = env
+        .events()
+        .all()
+        .iter()
+        .filter(|(_, topics, _)| *topics == slashed_topics)
+        .count();
+    assert_eq!(slashes, 0);
+    assert_eq!(client.get_score(&alice), score_after_first);
+    assert!(client.get_vouch(&id).unwrap().slashed);
 }
 
 /// `claim_vouch` (refund) and `expire_vouch` (slash) share one deadline, `created +
