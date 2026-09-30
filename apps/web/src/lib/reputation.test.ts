@@ -3,6 +3,7 @@
 // cross-realm one fails the SDK's checks.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Keypair, StrKey } from '@stellar/stellar-sdk';
+import type { ReadNetwork } from './read-network';
 
 const readPublicMock = vi.fn();
 const { invokeMock, REP_ID, TESTNET } = vi.hoisted(() => ({
@@ -220,6 +221,19 @@ describe('getVouch', () => {
     slashed: false,
   };
 
+  it("reads an override network's card with its own client, memoized apart from the deployment's (#438)", async () => {
+    const netClient = { getVouch: vi.fn().mockResolvedValue({ ...card, note: 'on testnet', claimed: true }) };
+    const net = { network: 'testnet', client: netClient } as unknown as ReadNetwork;
+    sdkMock.getVouch.mockResolvedValue({ ...card, claimed: true });
+    await expect(getVouch(7, net)).resolves.toMatchObject({ note: 'on testnet' });
+    await expect(getVouch(7)).resolves.toMatchObject({ note: 'hi' });
+    // Both claimed, so both stay memoized — each under its own network.
+    await expect(getVouch(7, net)).resolves.toMatchObject({ note: 'on testnet' });
+    await expect(getVouch(7)).resolves.toMatchObject({ note: 'hi' });
+    expect(netClient.getVouch).toHaveBeenCalledTimes(1);
+    expect(sdkMock.getVouch).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the SDK's half-card, null for an unknown id", async () => {
     sdkMock.getVouch.mockResolvedValueOnce(card).mockResolvedValueOnce(null);
     await expect(getVouch(7)).resolves.toEqual(card);
@@ -327,13 +341,52 @@ describe('getVouch', () => {
   });
 });
 
+describe('on a ?network= override (#290)', () => {
+  const netClient = { getProfile: vi.fn() };
+  const net = {
+    network: 'testnet',
+    contracts: { reputation: 'CTESTREP', registry: 'CTESTREG' },
+    client: netClient,
+  } as unknown as ReadNetwork;
+
+  beforeEach(() => {
+    readPublicMock.mockReset();
+    sdkMock.getProfile.mockReset();
+    netClient.getProfile.mockReset();
+  });
+
+  it("reads scores with the override's client, and never shares a read with the deployment's", async () => {
+    netClient.getProfile.mockResolvedValueOnce({ social: 12, earned: 3, verified: false });
+    sdkMock.getProfile.mockResolvedValueOnce({ social: 0, earned: 0, verified: false });
+    const [testnet, deployment] = await Promise.all([getScores('GSAME', net), getScores('GSAME')]);
+    expect(testnet).toEqual({ social: 12, earned: 3 });
+    expect(deployment).toEqual({ social: 0, earned: 0 });
+    expect(netClient.getProfile).toHaveBeenCalledWith('GSAME');
+    expect(sdkMock.getProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the people counters and the quest attestation from the override's contract", async () => {
+    readPublicMock.mockResolvedValueOnce([4, 2]);
+    expect(await getCounts('GSAME', net)).toEqual({ vouchedBy: 4, backed: 2 });
+    expect(readPublicMock).toHaveBeenLastCalledWith('CTESTREP', 'get_counts', [{ __addr: 'GSAME' }], net);
+    readPublicMock.mockResolvedValueOnce(null);
+    await getQuestAttestation('GSAME', net);
+    expect(readPublicMock).toHaveBeenLastCalledWith(
+      'CTESTREP',
+      'get_attestation',
+      [{ __addr: 'GSAME' }, { __u32: 2 }],
+      net,
+    );
+  });
+});
+
 describe('getCounts', () => {
   beforeEach(() => readPublicMock.mockReset());
 
   it('maps the (vouched_by, backed) tuple', async () => {
     readPublicMock.mockResolvedValueOnce([3, 1]);
     expect(await getCounts('GADDR')).toEqual({ vouchedBy: 3, backed: 1 });
-    expect(readPublicMock).toHaveBeenCalledWith(REP_ID, 'get_counts', expect.any(Array));
+    expect(readPublicMock).toHaveBeenCalledWith(REP_ID, 'get_counts', expect.any(Array), undefined);
   });
 
   it('is null, not zero, when the contract predates get_counts', async () => {
@@ -542,7 +595,7 @@ describe('getQuestAttestation', () => {
   it('reads the quest-schema attestation from the reputation contract', async () => {
     readPublicMock.mockResolvedValueOnce({ issuer: 'GATT', value: 25n, timestamp: 1_760_000_000n, revoked: false });
     const a = await getQuestAttestation(ADDR);
-    expect(readPublicMock).toHaveBeenCalledWith(REP_ID, 'get_attestation', [{ __addr: ADDR }, { __u32: 2 }]);
+    expect(readPublicMock).toHaveBeenCalledWith(REP_ID, 'get_attestation', [{ __addr: ADDR }, { __u32: 2 }], undefined);
     expect(a).toEqual({ issuer: 'GATT', value: 25n, timestamp: 1_760_000_000, revoked: false });
   });
 

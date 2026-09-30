@@ -122,6 +122,18 @@ describe('Rewards', () => {
     expect(button(plain).textContent).toBe('Claim');
   });
 
+  it('explains an underfunded treasury without blaming the claimer', async () => {
+    table([status(reward(1))]);
+    claimRewardMock.mockRejectedValue(new Error('HostError: Error(Contract, #100)'));
+    await render();
+    await act(async () => {
+      button(items()[0]).click();
+    });
+    expect(container.textContent).toContain('Rewards are temporarily out of funds');
+    expect(container.textContent).not.toContain("You don't have enough USDC");
+    expect(container.textContent).not.toContain('under review');
+  });
+
   it('explains a StreakTooShort (#18) revert from claim_reward', async () => {
     table([status(reward(1, { min_streak: 2 }))]);
     claimRewardMock.mockRejectedValue(new Error('HostError: Error(Contract, #18)'));
